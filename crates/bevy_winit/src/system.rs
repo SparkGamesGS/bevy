@@ -7,13 +7,13 @@ use bevy_ecs::{
     lifecycle::RemovedComponents,
     message::MessageWriter,
     prelude::{Changed, Commands, Component},
-    system::{Local, NonSendMarker, Query, SystemParamItem},
+    system::{NonSendMarker, Query, SystemParamItem},
 };
 use bevy_input::keyboard::{Key, KeyCode, KeyboardFocusLost, KeyboardInput};
 use bevy_window::{
     ClosingWindow, CursorOptions, HasWindows, Monitor, OnMonitor, PrimaryMonitor, RawHandleWrapper,
     VideoMode, Window, WindowClosed, WindowClosing, WindowCreated, WindowEvent, WindowFocused,
-    WindowMode, WindowScaleFactorChanged, WindowWrapper,
+    WindowMode, WindowScaleFactorChanged,
 };
 use tracing::{error, info, warn};
 
@@ -253,12 +253,14 @@ pub(crate) fn despawn_windows(
     window_entities: Query<Entity, With<Window>>,
     mut closing_event_writer: MessageWriter<WindowClosing>,
     mut closed_event_writer: MessageWriter<WindowClosed>,
-    mut windows_to_drop: Local<Vec<WindowWrapper<winit::window::Window>>>,
     mut exit_event_reader: MessageReader<AppExit>,
     _non_send_marker: NonSendMarker,
 ) {
-    // Drop all the windows that are waiting to be closed
-    windows_to_drop.clear();
+    // Drop the windows that closed last frame: the render world has let go of them by now.
+    // Take them out first, so that no borrow of `WINIT_WINDOWS` is held while they drop.
+    let closed_last_frame =
+        WINIT_WINDOWS.with_borrow_mut(|winit_windows| core::mem::take(&mut winit_windows.closed));
+    drop(closed_last_frame);
     for window in closing.iter() {
         closing_event_writer.write(WindowClosing { window });
     }
@@ -270,30 +272,22 @@ pub(crate) fn despawn_windows(
         if !window_entities.contains(window) {
             WINIT_WINDOWS.with_borrow_mut(|winit_windows| {
                 if let Some(window) = winit_windows.remove_window(window) {
-                    // Keeping WindowWrapper that are dropped for one frame
-                    // Otherwise the last `Arc` of the window could be in the rendering thread, and dropped there
-                    // This would hang on macOS
-                    // Keeping the wrapper and dropping it next frame in this system ensure its dropped in the main thread
-                    windows_to_drop.push(window);
+                    // Keep the window for a frame, so that its last reference is dropped here,
+                    // on the main thread, rather than by the render world.
+                    winit_windows.closed.push(window);
                 }
             });
             closed_event_writer.write(WindowClosed { window });
         }
     }
 
-    // On macOS, many things need to be dropped on the main thread, or the app will hang:
-    // - notify the rendering thread the windows are about to close
-    // - take the `WindowWrapper`s out of `WINIT_WINDOWS` and into the local `windows_to_drop`
+    // On exit, tell the render world that the windows are closing. The windows stay in
+    // `WINIT_WINDOWS`: the runner drops them after the app's world, and the render world with it.
     if !exit_event_reader.is_empty() {
         exit_event_reader.clear();
-        WINIT_WINDOWS.with_borrow_mut(|winit_windows| {
-            for window in window_entities.iter() {
-                closing_event_writer.write(WindowClosing { window });
-                if let Some(wrapper) = winit_windows.remove_window(window) {
-                    windows_to_drop.push(wrapper);
-                }
-            }
-        });
+        for window in window_entities.iter() {
+            closing_event_writer.write(WindowClosing { window });
+        }
     }
 }
 

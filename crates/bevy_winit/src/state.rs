@@ -507,12 +507,22 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        // Drop windows while event loop is still active, before TLS destruction.
-        // Prevents panic on macOS when exiting from exclusive fullscreen.
-        WINIT_WINDOWS.with(|ww| ww.borrow_mut().windows.clear());
+        // Tear the app's world down before the windows. The world owns the renderer, which keeps
+        // a reference to each window, on the render thread with pipelined rendering, and waits for
+        // that thread here. On macOS, a window dropped off the main thread waits for the main
+        // thread, so if the render thread dropped a window's last reference, the app would hang.
+        self.world_mut().clear_all();
 
-        let world = self.world_mut();
-        world.clear_all();
+        // Then drop the windows here, on the main thread, while the event loop is still active,
+        // before TLS destruction. Prevents panic on macOS when exiting from exclusive fullscreen.
+        // Take them out first, so that no borrow of `WINIT_WINDOWS` is held while they drop.
+        let windows = WINIT_WINDOWS.with_borrow_mut(|winit_windows| {
+            (
+                core::mem::take(&mut winit_windows.windows),
+                core::mem::take(&mut winit_windows.closed),
+            )
+        });
+        drop(windows);
     }
 }
 

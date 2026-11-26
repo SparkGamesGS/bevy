@@ -35,6 +35,13 @@ pub struct WinitWindows {
     pub entity_to_winit: EntityHashMap<WindowId>,
     /// Maps `winit` window identifiers to entities.
     pub winit_to_entity: HashMap<WindowId, Entity>,
+    /// Windows that closed, kept for a frame before they are dropped.
+    ///
+    /// The render world keeps a reference to each window, on the render thread with pipelined
+    /// rendering. On macOS, a window dropped off the main thread waits for the main thread, so a
+    /// window's last reference must be dropped here, on the main thread, once the render world has
+    /// let go of it. They are not in the app's world, so they outlive it at exit.
+    pub(crate) closed: Vec<WindowWrapper<WinitWindow>>,
     // Many `winit` window functions (e.g. `set_window_icon`) can only be called on the main thread.
     // If they're called on other threads, the program might hang. This marker indicates that this
     // type is not thread-safe and will be `!Send` and `!Sync`.
@@ -48,6 +55,7 @@ impl WinitWindows {
             windows: HashMap::new(),
             entity_to_winit: EntityHashMap::new(),
             winit_to_entity: HashMap::new(),
+            closed: Vec::new(),
             _not_send_sync: core::marker::PhantomData,
         }
     }

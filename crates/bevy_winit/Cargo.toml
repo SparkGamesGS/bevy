@@ -89,6 +89,10 @@ bevy_reflect = { path = "../bevy_reflect", version = "0.20.1", default-features 
   "web",
 ] }
 
+[[test]]
+name = "exit_drops_windows_on_main_thread"
+harness = false
+
 [lints]
 workspace = true
 
