@@ -232,6 +232,19 @@ pub struct PipelineCache {
     needs_shader_reload: bool,
 }
 
+/// Shader defs for what the graphics API behind `backend` can't do.
+fn backend_shader_defs(backend: wgpu::Backend) -> Vec<ShaderDefVal> {
+    let mut defs = Vec::new();
+    if backend == wgpu::Backend::Gl {
+        // A depth comparison on a cube map array at an explicit level
+        // (`textureSampleCompareLevel`) needs `GL_EXT_texture_shadow_lod` in
+        // GLSL, which many OpenGL ES drivers (Mali's, for one) lack and wgpu
+        // can't emulate. Shaders take the implicit level there instead.
+        defs.push("NO_CUBE_ARRAY_COMPARE_LEVEL_SUPPORT".into());
+    }
+    defs
+}
+
 impl PipelineCache {
     /// Returns an iterator over the pipelines in the pipeline cache.
     pub fn pipelines(&self) -> impl Iterator<Item = &CachedPipeline> {
@@ -256,6 +269,10 @@ impl PipelineCache {
         if cfg!(target_abi = "sim") {
             global_shader_defs.push("NO_CUBE_ARRAY_TEXTURES_SUPPORT".into());
         }
+
+        global_shader_defs.extend(backend_shader_defs(
+            device.wgpu_device().adapter_info().backend,
+        ));
 
         let available_storage_buffer_bindings =
             device.limits().max_storage_buffers_per_shader_stage;
@@ -1086,5 +1103,24 @@ fn create_pipeline_task(
     match bevy_tasks::block_on(task) {
         Ok(pipeline) => CachedPipelineState::Ok(pipeline),
         Err(err) => CachedPipelineState::Err(err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opengl_samples_cube_map_arrays_without_an_explicit_level() {
+        let def = ShaderDefVal::from("NO_CUBE_ARRAY_COMPARE_LEVEL_SUPPORT");
+        assert!(backend_shader_defs(wgpu::Backend::Gl).contains(&def));
+        for backend in [
+            wgpu::Backend::Vulkan,
+            wgpu::Backend::Metal,
+            wgpu::Backend::Dx12,
+            wgpu::Backend::BrowserWebGpu,
+        ] {
+            assert!(!backend_shader_defs(backend).contains(&def));
+        }
     }
 }

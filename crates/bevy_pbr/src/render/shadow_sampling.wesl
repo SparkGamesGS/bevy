@@ -315,12 +315,24 @@ fn sample_shadow_map_pcss(
 // behavior due to some of the fragments in a quad (2x2 fragments) being
 // processed not being sampled, and this messing with mip-mapping functionality.
 // The shadow maps have no mipmaps so Level just samples from LOD 0.
+// On OpenGL, sampling a cube map array at an explicit level needs
+// `GL_EXT_texture_shadow_lod`, which many drivers lack
+// (`NO_CUBE_ARRAY_COMPARE_LEVEL_SUPPORT`). There the implicit level is used:
+// with no mipmaps it is LOD 0 all the same.
 fn sample_shadow_cubemap_hardware(light_local: vec3<f32>, depth: f32, light_id: u32) -> f32 {
     @if(NO_CUBE_ARRAY_TEXTURES_SUPPORT)
     return textureSampleCompare(
         view_bindings::point_shadow_textures,
         view_bindings::point_shadow_textures_comparison_sampler,
         light_local,
+        depth
+    );
+    @elif(NO_CUBE_ARRAY_COMPARE_LEVEL_SUPPORT)
+    return textureSampleCompare(
+        view_bindings::point_shadow_textures,
+        view_bindings::point_shadow_textures_comparison_sampler,
+        light_local,
+        i32(light_id),
         depth
     );
     @else
