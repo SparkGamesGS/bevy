@@ -66,8 +66,8 @@ impl Deref for Texture {
 }
 
 /// The number of array layers to give a 2D texture of `size` that will be
-/// viewed as `view_dimension` on `backend`: `size.depth_or_array_layers`, or
-/// more where the backend needs it.
+/// viewed as `view_dimension` on a GPU with `backend` and `downlevel_flags`:
+/// `size.depth_or_array_layers`, or more where the backend needs it.
 ///
 /// On OpenGL a texture's kind (`TEXTURE_2D`, `TEXTURE_2D_ARRAY`,
 /// `TEXTURE_CUBE_MAP` or `TEXTURE_CUBE_MAP_ARRAY`) is fixed when it is made,
@@ -79,10 +79,13 @@ impl Deref for Texture {
 /// to ..." each time it is bound. So on OpenGL a texture viewed as a
 /// [`D2Array`](wgpu::TextureViewDimension::D2Array) gets at least two layers
 /// and never a cube's count, and one viewed as a
-/// [`CubeArray`](wgpu::TextureViewDimension::CubeArray) at least two cubes.
-/// Every other backend keeps the count it is given.
+/// [`CubeArray`](wgpu::TextureViewDimension::CubeArray) at least two cubes,
+/// where the GPU has cube map arrays at all
+/// ([`CUBE_ARRAY_TEXTURES`](wgpu::DownlevelFlags::CUBE_ARRAY_TEXTURES); WebGL 2
+/// doesn't). Every other backend keeps the count it is given.
 pub fn array_layers_for_view(
     backend: wgpu::Backend,
+    downlevel_flags: wgpu::DownlevelFlags,
     view_dimension: wgpu::TextureViewDimension,
     size: wgpu::Extent3d,
 ) -> u32 {
@@ -99,7 +102,11 @@ pub fn array_layers_for_view(
                 layers
             }
         }
-        wgpu::TextureViewDimension::CubeArray => layers.div_ceil(6).max(2) * 6,
+        wgpu::TextureViewDimension::CubeArray
+            if downlevel_flags.contains(wgpu::DownlevelFlags::CUBE_ARRAY_TEXTURES) =>
+        {
+            layers.div_ceil(6).max(2) * 6
+        }
         _ => layers,
     }
 }
@@ -245,7 +252,7 @@ impl FromWorld for DefaultImageSampler {
 mod tests {
     use super::array_layers_for_view;
     use wgpu::{
-        Backend, Extent3d,
+        Backend, DownlevelFlags, Extent3d,
         TextureViewDimension::{self, *},
     };
 
@@ -288,7 +295,12 @@ mod tests {
                 _ => &[1, 2, 3, 5, 6, 7, 11, 12, 13, 18, 24, 36, 256],
             };
             for &layers in needed {
-                let given = array_layers_for_view(Backend::Gl, view_dimension, size(width, layers));
+                let given = array_layers_for_view(
+                    Backend::Gl,
+                    DownlevelFlags::all(),
+                    view_dimension,
+                    size(width, layers),
+                );
                 assert!(
                     given >= layers,
                     "{view_dimension:?}: {given} < {layers} layers"
@@ -305,7 +317,12 @@ mod tests {
     #[test]
     fn opengl_adds_layers_only_where_needed() {
         let gl = |view_dimension, layers| {
-            array_layers_for_view(Backend::Gl, view_dimension, size(2048, layers))
+            array_layers_for_view(
+                Backend::Gl,
+                DownlevelFlags::all(),
+                view_dimension,
+                size(2048, layers),
+            )
         };
         assert_eq!(gl(D2Array, 1), 2);
         assert_eq!(gl(D2Array, 4), 4);
@@ -327,10 +344,28 @@ mod tests {
         ] {
             for (view_dimension, layers) in [(D2Array, 1), (D2Array, 6), (CubeArray, 6), (D2, 1)] {
                 assert_eq!(
-                    array_layers_for_view(backend, view_dimension, size(2048, layers)),
+                    array_layers_for_view(
+                        backend,
+                        DownlevelFlags::all(),
+                        view_dimension,
+                        size(2048, layers)
+                    ),
                     layers
                 );
             }
         }
+    }
+
+    #[test]
+    fn opengl_without_cube_map_arrays_keeps_a_cube_map() {
+        let webgl2 = DownlevelFlags::all() - DownlevelFlags::CUBE_ARRAY_TEXTURES;
+        assert_eq!(
+            array_layers_for_view(Backend::Gl, webgl2, CubeArray, size(2048, 6)),
+            6
+        );
+        assert_eq!(
+            array_layers_for_view(Backend::Gl, webgl2, D2Array, size(2048, 1)),
+            2
+        );
     }
 }

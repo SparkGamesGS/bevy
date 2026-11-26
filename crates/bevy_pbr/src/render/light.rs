@@ -64,7 +64,9 @@ use bevy_render::{
     render_asset::RenderAssets,
     render_phase::*,
     render_resource::*,
-    renderer::{RenderAdapterInfo, RenderContext, RenderDevice, RenderQueue, ViewQuery},
+    renderer::{
+        RenderAdapter, RenderAdapterInfo, RenderContext, RenderDevice, RenderQueue, ViewQuery,
+    },
     texture::*,
     view::ExtractedView,
     Extract,
@@ -77,7 +79,7 @@ use decal::clustered::RenderClusteredDecals;
 #[cfg(feature = "trace")]
 use tracing::info_span;
 use tracing::{error, warn};
-use wgpu_types::Backend;
+use wgpu_types::{Backend, DownlevelFlags};
 
 #[derive(Component)]
 #[require(PointAndSpotLightViewEntities)]
@@ -1105,6 +1107,7 @@ const DIRECTIONAL_LIGHT_SHADOW_MAP_VIEW_DIMENSION: TextureViewDimension = if cfg
 /// kind of texture its view binds (see [`array_layers_for_view`]).
 fn point_light_shadow_map_texture(
     backend: Backend,
+    downlevel_flags: DownlevelFlags,
     count: usize,
     size: u32,
 ) -> TextureDescriptor<'static> {
@@ -1118,6 +1121,7 @@ fn point_light_shadow_map_texture(
         size: Extent3d {
             depth_or_array_layers: array_layers_for_view(
                 backend,
+                downlevel_flags,
                 POINT_LIGHT_SHADOW_MAP_VIEW_DIMENSION,
                 size,
             ),
@@ -1139,6 +1143,7 @@ fn point_light_shadow_map_texture(
 /// [`array_layers_for_view`]).
 fn directional_light_shadow_map_texture(
     backend: Backend,
+    downlevel_flags: DownlevelFlags,
     count: usize,
     size: u32,
 ) -> TextureDescriptor<'static> {
@@ -1152,6 +1157,7 @@ fn directional_light_shadow_map_texture(
         size: Extent3d {
             depth_or_array_layers: array_layers_for_view(
                 backend,
+                downlevel_flags,
                 DIRECTIONAL_LIGHT_SHADOW_MAP_VIEW_DIMENSION,
                 size,
             ),
@@ -1181,9 +1187,10 @@ fn shadow_map_texture_size(count: usize, size: u32) -> u32 {
 pub fn prepare_lights(
     mut commands: Commands,
     mut texture_cache: ResMut<TextureCache>,
-    (render_device, render_queue, render_adapter_info): (
+    (render_device, render_queue, render_adapter, render_adapter_info): (
         Res<RenderDevice>,
         Res<RenderQueue>,
+        Res<RenderAdapter>,
         Res<RenderAdapterInfo>,
     ),
     mut global_clusterable_object_meta: ResMut<GlobalClusterableObjectMeta>,
@@ -1615,10 +1622,12 @@ pub fn prepare_lights(
     let mut directional_light_depth_attachments =
         HashMap::<u32, DepthStencilViewAttachment>::default();
 
+    let downlevel_flags = render_adapter.get_downlevel_capabilities().flags;
     let point_light_depth_texture = texture_cache.get(
         &render_device,
         point_light_shadow_map_texture(
             render_adapter_info.backend,
+            downlevel_flags,
             point_light_shadow_maps_count,
             point_light_shadow_map.size as u32,
         ),
@@ -1643,6 +1652,7 @@ pub fn prepare_lights(
         &render_device,
         directional_light_shadow_map_texture(
             render_adapter_info.backend,
+            downlevel_flags,
             num_directional_cascades_enabled + spot_light_shadow_maps_count,
             (directional_light_shadow_map.size as u32)
                 .min(render_device.limits().max_texture_dimension_2d),
@@ -3262,8 +3272,8 @@ mod tests {
     fn no_shadow_maps_take_no_shadow_map_memory() {
         for backend in [Backend::Vulkan, Backend::Gl] {
             for texture in [
-                point_light_shadow_map_texture(backend, 0, 1024),
-                directional_light_shadow_map_texture(backend, 0, 2048),
+                point_light_shadow_map_texture(backend, DownlevelFlags::all(), 0, 1024),
+                directional_light_shadow_map_texture(backend, DownlevelFlags::all(), 0, 2048),
             ] {
                 assert_eq!((texture.size.width, texture.size.height), (1, 1));
             }
@@ -3279,19 +3289,19 @@ mod tests {
         };
         let vulkan = Backend::Vulkan;
         assert_eq!(
-            point_light_shadow_map_texture(vulkan, 1, 1024).size,
+            point_light_shadow_map_texture(vulkan, DownlevelFlags::all(), 1, 1024).size,
             size(1024, 6)
         );
         assert_eq!(
-            point_light_shadow_map_texture(vulkan, 3, 512).size,
+            point_light_shadow_map_texture(vulkan, DownlevelFlags::all(), 3, 512).size,
             size(512, 18)
         );
         assert_eq!(
-            directional_light_shadow_map_texture(vulkan, 1, 2048).size,
+            directional_light_shadow_map_texture(vulkan, DownlevelFlags::all(), 1, 2048).size,
             size(2048, 1)
         );
         assert_eq!(
-            directional_light_shadow_map_texture(vulkan, 6, 4096).size,
+            directional_light_shadow_map_texture(vulkan, DownlevelFlags::all(), 6, 4096).size,
             size(4096, 6)
         );
     }
@@ -3310,7 +3320,9 @@ mod tests {
             TextureViewDimension::D2Array
         );
         for count in 0..=13 {
-            let point = point_light_shadow_map_texture(Backend::Gl, count, 1024).size;
+            let point =
+                point_light_shadow_map_texture(Backend::Gl, DownlevelFlags::all(), count, 1024)
+                    .size;
             let layers = point.depth_or_array_layers;
             assert!(layers >= count.max(1) as u32 * 6);
             assert!(
@@ -3318,7 +3330,13 @@ mod tests {
                 "{count} point lights: {layers} layers"
             );
 
-            let directional = directional_light_shadow_map_texture(Backend::Gl, count, 2048).size;
+            let directional = directional_light_shadow_map_texture(
+                Backend::Gl,
+                DownlevelFlags::all(),
+                count,
+                2048,
+            )
+            .size;
             let layers = directional.depth_or_array_layers;
             assert!(layers >= count.max(1) as u32);
             assert!(

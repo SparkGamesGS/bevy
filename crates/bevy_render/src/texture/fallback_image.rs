@@ -1,6 +1,6 @@
 use crate::{
     render_resource::*,
-    renderer::{RenderDevice, RenderQueue},
+    renderer::{RenderAdapter, RenderDevice, RenderQueue},
     texture::{DefaultImageSampler, GpuImage},
 };
 use bevy_asset::RenderAssetUsages;
@@ -66,6 +66,7 @@ pub struct FallbackImageCubemap(GpuImage);
 
 fn fallback_image_new(
     render_device: &RenderDevice,
+    downlevel_flags: DownlevelFlags,
     render_queue: &RenderQueue,
     default_sampler: &DefaultImageSampler,
     format: TextureFormat,
@@ -85,6 +86,7 @@ fn fallback_image_new(
     };
     extents.depth_or_array_layers = array_layers_for_view(
         render_device.wgpu_device().adapter_info().backend,
+        downlevel_flags,
         dimension,
         extents,
     );
@@ -149,11 +151,16 @@ fn fallback_image_new(
 impl FromWorld for FallbackImage {
     fn from_world(world: &mut bevy_ecs::prelude::World) -> Self {
         let render_device = world.resource::<RenderDevice>();
+        let downlevel_flags = world
+            .resource::<RenderAdapter>()
+            .get_downlevel_capabilities()
+            .flags;
         let render_queue = world.resource::<RenderQueue>();
         let default_sampler = world.resource::<DefaultImageSampler>();
         Self {
             d1: fallback_image_new(
                 render_device,
+                downlevel_flags,
                 render_queue,
                 default_sampler,
                 TextureFormat::Rgba8UnormSrgb,
@@ -163,6 +170,7 @@ impl FromWorld for FallbackImage {
             ),
             d2: fallback_image_new(
                 render_device,
+                downlevel_flags,
                 render_queue,
                 default_sampler,
                 TextureFormat::Rgba8UnormSrgb,
@@ -172,6 +180,7 @@ impl FromWorld for FallbackImage {
             ),
             d2_array: fallback_image_new(
                 render_device,
+                downlevel_flags,
                 render_queue,
                 default_sampler,
                 TextureFormat::Rgba8UnormSrgb,
@@ -181,6 +190,7 @@ impl FromWorld for FallbackImage {
             ),
             cube: fallback_image_new(
                 render_device,
+                downlevel_flags,
                 render_queue,
                 default_sampler,
                 TextureFormat::Rgba8UnormSrgb,
@@ -190,6 +200,7 @@ impl FromWorld for FallbackImage {
             ),
             cube_array: fallback_image_new(
                 render_device,
+                downlevel_flags,
                 render_queue,
                 default_sampler,
                 TextureFormat::Rgba8UnormSrgb,
@@ -199,6 +210,7 @@ impl FromWorld for FallbackImage {
             ),
             d3: fallback_image_new(
                 render_device,
+                downlevel_flags,
                 render_queue,
                 default_sampler,
                 TextureFormat::Rgba8UnormSrgb,
@@ -213,10 +225,15 @@ impl FromWorld for FallbackImage {
 impl FromWorld for FallbackImageZero {
     fn from_world(world: &mut bevy_ecs::prelude::World) -> Self {
         let render_device = world.resource::<RenderDevice>();
+        let downlevel_flags = world
+            .resource::<RenderAdapter>()
+            .get_downlevel_capabilities()
+            .flags;
         let render_queue = world.resource::<RenderQueue>();
         let default_sampler = world.resource::<DefaultImageSampler>();
         Self(fallback_image_new(
             render_device,
+            downlevel_flags,
             render_queue,
             default_sampler,
             TextureFormat::Rgba8UnormSrgb,
@@ -230,10 +247,15 @@ impl FromWorld for FallbackImageZero {
 impl FromWorld for FallbackImageCubemap {
     fn from_world(world: &mut bevy_ecs::prelude::World) -> Self {
         let render_device = world.resource::<RenderDevice>();
+        let downlevel_flags = world
+            .resource::<RenderAdapter>()
+            .get_downlevel_capabilities()
+            .flags;
         let render_queue = world.resource::<RenderQueue>();
         let default_sampler = world.resource::<DefaultImageSampler>();
         Self(fallback_image_new(
             render_device,
+            downlevel_flags,
             render_queue,
             default_sampler,
             TextureFormat::Rgba8UnormSrgb,
@@ -256,6 +278,7 @@ pub struct FallbackImageFormatMsaaCache(HashMap<(u32, TextureFormat), GpuImage>)
 pub struct FallbackImageMsaa<'w> {
     cache: ResMut<'w, FallbackImageFormatMsaaCache>,
     render_device: Res<'w, RenderDevice>,
+    render_adapter: Res<'w, RenderAdapter>,
     render_queue: Res<'w, RenderQueue>,
     default_sampler: Res<'w, DefaultImageSampler>,
 }
@@ -265,6 +288,7 @@ impl<'w> FallbackImageMsaa<'w> {
         self.cache.entry((sample_count, format)).or_insert_with(|| {
             fallback_image_new(
                 &self.render_device,
+                self.render_adapter.get_downlevel_capabilities().flags,
                 &self.render_queue,
                 &self.default_sampler,
                 format,
