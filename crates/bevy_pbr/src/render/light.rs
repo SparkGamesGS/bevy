@@ -36,6 +36,7 @@ use bevy_math::{ops, proj, Mat4, UVec4, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use bevy_mesh::{Mesh3d, MeshVertexBufferLayoutRef};
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_platform::hash::FixedHasher;
+use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::batching::gpu_preprocessing::{
     BuildIndirectParametersMetadata, IndirectParametersBuffers,
 };
@@ -57,6 +58,7 @@ use bevy_render::{
     mesh::allocator::MeshAllocator,
     view::{NoIndirectDrawing, RetainedViewEntity},
 };
+use bevy_render::{extract_component::ExtractComponent, RenderApp};
 use bevy_render::{
     mesh::RenderMesh,
     render_asset::RenderAssets,
@@ -297,6 +299,26 @@ pub fn extract_shadow_filtering_method(
     *previous_len = values.len();
     commands.try_insert_batch(values);
 }
+
+/// Add this component to a [`Camera3d`] to leave shadow sampling out of the
+/// shaders that draw its view.
+///
+/// Lit materials sample the shadow maps of the lights that cast shadows. Which
+/// lights cast shadows can change from frame to frame, so their shaders always
+/// hold the code that samples shadow maps, and skip it at runtime when no light
+/// casts shadows. On some GPUs, mobile ones in particular, a shader that holds
+/// that code runs markedly slower even when it skips it. With this component
+/// the meshes this camera draws receive no shadows, whatever the lights do, and
+/// their shaders hold no shadow sampling. The lights still render their shadow
+/// maps for other cameras.
+///
+/// Adding or removing it rebuilds the pipelines of the materials the camera
+/// draws.
+#[derive(Component, Reflect, ExtractComponent, Clone, Copy, Default, Debug)]
+#[extract_component_filter(With<Camera>)]
+#[reflect(Component, Default, Clone, Debug)]
+#[extract_app(RenderApp)]
+pub struct NoShadowSampling;
 
 // This is needed because of the orphan rule not allowing implementing
 // foreign trait ExtractResource on foreign type AmbientLight

@@ -1,7 +1,7 @@
 use crate::{
-    irradiance_volume::IRRADIANCE_VOLUMES_ARE_USABLE, MeshPipeline, MeshPipelineKey,
-    MeshPipelineSystems, MeshViewBindGroup, ViewKeyCache, TONEMAPPING_LUT_SAMPLER_BINDING_INDEX,
-    TONEMAPPING_LUT_TEXTURE_BINDING_INDEX,
+    irradiance_volume::IRRADIANCE_VOLUMES_ARE_USABLE, push_shadow_shader_defs, MeshPipeline,
+    MeshPipelineKey, MeshPipelineSystems, MeshViewBindGroup, ViewKeyCache,
+    TONEMAPPING_LUT_SAMPLER_BINDING_INDEX, TONEMAPPING_LUT_TEXTURE_BINDING_INDEX,
 };
 use bevy_app::prelude::*;
 use bevy_asset::{embedded_asset, load_embedded_asset, AssetServer, Handle};
@@ -302,15 +302,7 @@ impl SpecializedRenderPipeline for DeferredLightingLayout {
         // Always true, since we're in the deferred lighting pipeline
         shader_defs.push("DEFERRED_PREPASS".into());
 
-        let shadow_filter_method =
-            key.intersection(MeshPipelineKey::SHADOW_FILTER_METHOD_RESERVED_BITS);
-        if shadow_filter_method == MeshPipelineKey::SHADOW_FILTER_METHOD_HARDWARE_2X2 {
-            shader_defs.push("SHADOW_FILTER_METHOD_HARDWARE_2X2".into());
-        } else if shadow_filter_method == MeshPipelineKey::SHADOW_FILTER_METHOD_GAUSSIAN {
-            shader_defs.push("SHADOW_FILTER_METHOD_GAUSSIAN".into());
-        } else if shadow_filter_method == MeshPipelineKey::SHADOW_FILTER_METHOD_TEMPORAL {
-            shader_defs.push("SHADOW_FILTER_METHOD_TEMPORAL".into());
-        }
+        push_shadow_shader_defs(key, &mut shader_defs);
         if self.mesh_pipeline.binding_arrays_are_usable {
             shader_defs.push("MULTIPLE_LIGHT_PROBES_IN_ARRAY".into());
             shader_defs.push("MULTIPLE_LIGHTMAPS_IN_ARRAY".into());

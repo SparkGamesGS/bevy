@@ -387,6 +387,7 @@ pub fn check_views_need_specialization(
             Has<ExtractedAtmosphere>,
             Has<ScreenSpaceReflectionsUniform>,
             Has<ContactShadows>,
+            Has<NoShadowSampling>,
         ),
     )>,
     mut seen_views: Local<HashSet<RetainedViewEntity>>,
@@ -406,7 +407,7 @@ pub fn check_views_need_specialization(
         projection,
         distance_fog,
         (has_environment_maps, has_irradiance_volumes),
-        (has_oit, has_atmosphere, has_ssr, has_contact_shadows),
+        (has_oit, has_atmosphere, has_ssr, has_contact_shadows, no_shadow_sampling),
     ) in views.iter_mut()
     {
         seen_views.insert(view.retained_view_entity);
@@ -456,6 +457,10 @@ pub fn check_views_need_specialization(
 
         if has_contact_shadows {
             view_key |= MeshPipelineKey::CONTACT_SHADOWS;
+        }
+
+        if no_shadow_sampling {
+            view_key |= MeshPipelineKey::NO_SHADOW_SAMPLING;
         }
 
         if view.invert_culling {
@@ -3128,7 +3133,8 @@ bitflags::bitflags! {
         const INVERT_CULLING                    = 1 << 22;
         const PREPASS_READS_MATERIAL            = 1 << 23;
         const CONTACT_SHADOWS                   = 1 << 24;
-        const LAST_FLAG                         = Self::CONTACT_SHADOWS.bits();
+        const NO_SHADOW_SAMPLING                = 1 << 25; // See `NoShadowSampling`
+        const LAST_FLAG                         = Self::NO_SHADOW_SAMPLING.bits();
 
         const ALL_PREPASS_BITS                  = Self::DEPTH_PREPASS.bits()
                                                 | Self::NORMAL_PREPASS.bits()
@@ -3297,6 +3303,25 @@ impl MeshPipelineKey {
 impl From<u64> for MeshPipelineKey {
     fn from(value: u64) -> Self {
         MeshPipelineKey::from_bits_retain(value)
+    }
+}
+
+/// Pushes the shader defs that decide how lit shaders sample shadow maps for
+/// the view `key` describes: whether they do at all ([`NoShadowSampling`]),
+/// and with which [`ShadowFilteringMethod`].
+pub fn push_shadow_shader_defs(key: MeshPipelineKey, shader_defs: &mut Vec<ShaderDefVal>) {
+    if key.contains(MeshPipelineKey::NO_SHADOW_SAMPLING) {
+        shader_defs.push("NO_SHADOW_SAMPLING".into());
+    }
+
+    let shadow_filter_method =
+        key.intersection(MeshPipelineKey::SHADOW_FILTER_METHOD_RESERVED_BITS);
+    if shadow_filter_method == MeshPipelineKey::SHADOW_FILTER_METHOD_HARDWARE_2X2 {
+        shader_defs.push("SHADOW_FILTER_METHOD_HARDWARE_2X2".into());
+    } else if shadow_filter_method == MeshPipelineKey::SHADOW_FILTER_METHOD_GAUSSIAN {
+        shader_defs.push("SHADOW_FILTER_METHOD_GAUSSIAN".into());
+    } else if shadow_filter_method == MeshPipelineKey::SHADOW_FILTER_METHOD_TEMPORAL {
+        shader_defs.push("SHADOW_FILTER_METHOD_TEMPORAL".into());
     }
 }
 
@@ -3685,15 +3710,7 @@ impl SpecializedMeshPipeline for MeshPipeline {
             shader_defs.push("TEMPORAL_JITTER".into());
         }
 
-        let shadow_filter_method =
-            key.intersection(MeshPipelineKey::SHADOW_FILTER_METHOD_RESERVED_BITS);
-        if shadow_filter_method == MeshPipelineKey::SHADOW_FILTER_METHOD_HARDWARE_2X2 {
-            shader_defs.push("SHADOW_FILTER_METHOD_HARDWARE_2X2".into());
-        } else if shadow_filter_method == MeshPipelineKey::SHADOW_FILTER_METHOD_GAUSSIAN {
-            shader_defs.push("SHADOW_FILTER_METHOD_GAUSSIAN".into());
-        } else if shadow_filter_method == MeshPipelineKey::SHADOW_FILTER_METHOD_TEMPORAL {
-            shader_defs.push("SHADOW_FILTER_METHOD_TEMPORAL".into());
-        }
+        push_shadow_shader_defs(key, &mut shader_defs);
 
         if key.contains(MeshPipelineKey::VIEW_TRANSMISSION_TEXTURE) {
             shader_defs.push("VIEW_TRANSMISSION_TEXTURE".into());
@@ -4876,7 +4893,71 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
 mod tests {
     use core::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{AtomicU64ZeroBitIter, MeshPipelineKey};
+    use super::{
+        check_views_need_specialization, push_shadow_shader_defs, AtomicU64ZeroBitIter,
+        MeshPipelineKey, ViewKeyCache,
+    };
+    use crate::NoShadowSampling;
+    use bevy_ecs::{entity::Entity, system::RunSystemOnce, world::World};
+    use bevy_math::{Mat4, UVec4};
+    use bevy_render::{
+        camera::DirtySpecializations,
+        render_resource::TextureFormat,
+        sync_world::MainEntity,
+        view::{ExtractedView, Msaa, RetainedViewEntity},
+    };
+    use bevy_shader::ShaderDefVal;
+    use bevy_transform::components::GlobalTransform;
+
+    /// The key [`check_views_need_specialization`] gives a view, with or
+    /// without [`NoShadowSampling`].
+    fn view_key(no_shadow_sampling: bool) -> MeshPipelineKey {
+        let mut world = World::new();
+        world.init_resource::<ViewKeyCache>();
+        world.init_resource::<DirtySpecializations>();
+        let retained_view_entity =
+            RetainedViewEntity::new(MainEntity::from(Entity::PLACEHOLDER), None, 0);
+        let mut view = world.spawn((
+            ExtractedView {
+                retained_view_entity,
+                clip_from_view: Mat4::IDENTITY,
+                world_from_view: GlobalTransform::IDENTITY,
+                clip_from_world: None,
+                target_format: TextureFormat::Rgba8UnormSrgb,
+                viewport: UVec4::ZERO,
+                color_grading: Default::default(),
+                invert_culling: false,
+            },
+            Msaa::Off,
+        ));
+        if no_shadow_sampling {
+            view.insert(NoShadowSampling);
+        }
+        world
+            .run_system_once(check_views_need_specialization)
+            .unwrap();
+        world.resource::<ViewKeyCache>()[&retained_view_entity]
+    }
+
+    #[test]
+    fn a_view_with_no_shadow_sampling_has_it_in_its_key() {
+        assert!(view_key(true).contains(MeshPipelineKey::NO_SHADOW_SAMPLING));
+        assert!(!view_key(false).contains(MeshPipelineKey::NO_SHADOW_SAMPLING));
+    }
+
+    #[test]
+    fn no_shadow_sampling_leaves_shadow_sampling_out_of_the_shaders() {
+        let defs = |key| {
+            let mut defs = Vec::new();
+            push_shadow_shader_defs(key, &mut defs);
+            defs
+        };
+        let def = ShaderDefVal::from("NO_SHADOW_SAMPLING");
+        let gaussian = MeshPipelineKey::SHADOW_FILTER_METHOD_GAUSSIAN;
+        assert!(defs(gaussian | MeshPipelineKey::NO_SHADOW_SAMPLING).contains(&def));
+        assert!(!defs(gaussian).contains(&def));
+        assert!(defs(gaussian).contains(&ShaderDefVal::from("SHADOW_FILTER_METHOD_GAUSSIAN")));
+    }
 
     #[test]
     fn mesh_key_msaa_samples() {

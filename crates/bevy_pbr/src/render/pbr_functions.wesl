@@ -475,6 +475,7 @@ fn apply_pbr_lighting(
         let enable_diffuse = true;
 
         var shadow: f32 = 1.0;
+        @if(!NO_SHADOW_SAMPLING)
         if ((in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
                 && (view_bindings::clustered_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
             shadow = shadows::fetch_point_shadow(light_id, in.world_position, in.world_normal, in.frag_coord.xy);
@@ -502,6 +503,7 @@ fn apply_pbr_lighting(
         // F_ab = vec2<f32>(0.1)
         // F0 = vec3<f32>(0.0)
         var transmitted_shadow: f32 = 1.0;
+        @if(!NO_SHADOW_SAMPLING)
         if ((in.flags & (MESH_FLAGS_SHADOW_RECEIVER_BIT | MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT)) == (MESH_FLAGS_SHADOW_RECEIVER_BIT | MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT)
                 && (view_bindings::clustered_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
             transmitted_shadow = shadows::fetch_point_shadow(light_id, diffuse_transmissive_lobe_world_position, -in.world_normal, in.frag_coord.xy);
@@ -529,6 +531,7 @@ fn apply_pbr_lighting(
         let enable_diffuse = true;
 
         var shadow: f32 = 1.0;
+        @if(!NO_SHADOW_SAMPLING)
         if ((in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
                 && (view_bindings::clustered_lights.data[light_id].flags &
                     mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
@@ -563,6 +566,7 @@ fn apply_pbr_lighting(
         // F_ab = vec2<f32>(0.1)
         // F0 = vec3<f32>(0.0)
         var transmitted_shadow: f32 = 1.0;
+        @if(!NO_SHADOW_SAMPLING)
         if ((in.flags & (MESH_FLAGS_SHADOW_RECEIVER_BIT | MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT)) == (MESH_FLAGS_SHADOW_RECEIVER_BIT | MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT)
                 && (view_bindings::clustered_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
             transmitted_shadow = shadows::fetch_spot_shadow(
@@ -598,6 +602,7 @@ fn apply_pbr_lighting(
         let enable_diffuse = true;
 
         var shadow: f32 = 1.0;
+        @if(!NO_SHADOW_SAMPLING)
         if ((in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
                 && (view_bindings::lights.directional_lights[i].flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
             shadow = shadows::fetch_directional_shadow(i, in.world_position, in.world_normal, view_z, in.frag_coord.xy);
@@ -629,6 +634,7 @@ fn apply_pbr_lighting(
         // F_ab = vec2<f32>(0.1)
         // F0 = vec3<f32>(0.0)
         var transmitted_shadow: f32 = 1.0;
+        @if(!NO_SHADOW_SAMPLING)
         if ((in.flags & (MESH_FLAGS_SHADOW_RECEIVER_BIT | MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT)) == (MESH_FLAGS_SHADOW_RECEIVER_BIT | MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT)
                 && (view_bindings::lights.directional_lights[i].flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
             transmitted_shadow = shadows::fetch_directional_shadow(i, diffuse_transmissive_lobe_world_position, -in.world_normal, view_z, in.frag_coord.xy);
@@ -902,6 +908,7 @@ fn apply_fog(
 
             // Sample shadow map to attenuate inscattering in shadowed areas
             var shadow: f32 = 1.0;
+            @if(!NO_SHADOW_SAMPLING)
             if ((light.flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
                 shadow = shadows::fetch_directional_shadow(i, fragment_world_position_vec4, view_direction_normal, view_z, frag_coord_xy);
             }
