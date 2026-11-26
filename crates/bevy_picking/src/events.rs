@@ -806,7 +806,9 @@ pub struct PickingMessageWriters<'w> {
 /// rather than the current frame. This is because touch pointers hover nothing
 /// on the frame they are released. The end effect is that these two events can
 /// be received sequentially after an [`PointerOut`] event (but always on the same frame
-/// as the [`PointerOut`] event).
+/// as the [`PointerOut`] event). A pointer that did not exist in the previous frame,
+/// such as a touch that starts and ends within one frame, has no previous hover, so
+/// these events target the entity it hovers in the current frame instead.
 ///
 /// Note: Though it is common for the [`PointerInput`] stream may contain
 /// multiple pointer movements and presses each frame, the hover state is
@@ -1089,8 +1091,12 @@ pub fn pointer_events(
                 });
 
                 // Emit Click and Release events on all the previously hovered entities.
+                // A pointer that didn't exist last frame (a touch that started and
+                // ended within this frame) has no previous hover; it releases over
+                // what it hovers now, which is where it was pressed.
                 for (hovered_entity, hit) in previous_hover_map
                     .get(&pointer_id)
+                    .or_else(|| hover_map.get(&pointer_id))
                     .iter()
                     .flat_map(|h| h.iter().map(|(entity, data)| (*entity, data.clone())))
                 {
@@ -1566,5 +1572,87 @@ mod tests {
         assert_observer_event_counts(&app, child_two, 2, 0, 2, 0);
         app.world_mut().increment_change_tick();
         // ---
+    }
+
+    /// A finger that touches a target and lifts within the frame,
+    /// one app update per frame. `frames` is 1 for a touch that starts and
+    /// ends in the same frame, 2 for one that ends in the next frame.
+    fn clicks_from_touch(frames: usize) -> usize {
+        use crate::{input::PointerInputPlugin, InteractionPlugin, PickingPlugin, PickingSystems};
+        use bevy_input::touch::TouchInput;
+        use bevy_window::{PrimaryWindow, WindowEvent};
+
+        #[derive(Resource, Default)]
+        struct Clicks(usize);
+
+        #[derive(Component)]
+        struct Target;
+
+        /// A stand-in picking backend: every located pointer is over `Target`.
+        fn hit_target(
+            pointers: Query<(&PointerId, &PointerLocation)>,
+            target: Single<Entity, With<Target>>,
+            mut hits: MessageWriter<crate::backend::PointerHits>,
+        ) {
+            for (id, location) in &pointers {
+                if location.location().is_some() {
+                    let hit = HitData::new(*target, 0.0, None, None);
+                    hits.write(crate::backend::PointerHits::new(
+                        *id,
+                        vec![(*target, hit)],
+                        0.0,
+                    ));
+                }
+            }
+        }
+
+        let mut app = App::new();
+        app.add_message::<WindowEvent>()
+            .add_message::<TouchInput>()
+            .add_plugins((PickingPlugin, InteractionPlugin, PointerInputPlugin))
+            .init_resource::<Clicks>()
+            .add_systems(
+                bevy_app::PreUpdate,
+                hit_target.in_set(PickingSystems::Backend),
+            );
+        let window = app
+            .world_mut()
+            .spawn((Window::default(), PrimaryWindow))
+            .id();
+        app.world_mut()
+            .spawn(Target)
+            .observe(|_: On<PointerClick>, mut clicks: ResMut<Clicks>| clicks.0 += 1);
+        app.update();
+
+        let touch = |phase| TouchInput {
+            phase,
+            position: Vec2::new(10.0, 10.0),
+            window,
+            force: None,
+            id: 1,
+        };
+        for phase in [TouchPhase::Started, TouchPhase::Ended] {
+            app.world_mut().write_message(touch(phase));
+            app.world_mut()
+                .write_message(WindowEvent::TouchInput(touch(phase)));
+            if frames == 2 {
+                app.update();
+            }
+        }
+        if frames == 1 {
+            app.update();
+        }
+        app.update();
+        app.world().resource::<Clicks>().0
+    }
+
+    #[test]
+    fn touch_over_two_frames_clicks() {
+        assert_eq!(clicks_from_touch(2), 1);
+    }
+
+    #[test]
+    fn touch_starting_and_ending_in_one_frame_clicks() {
+        assert_eq!(clicks_from_touch(1), 1);
     }
 }

@@ -151,3 +151,85 @@ impl Plugin for ButtonPlugin {
             .add_observer(button_on_pointer_cancel);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_app::PreUpdate;
+    use bevy_ecs::{
+        message::MessageWriter, resource::Resource, schedule::IntoScheduleConfigs, system::ResMut,
+        system::Single,
+    };
+    use bevy_input::touch::{TouchInput, TouchPhase};
+    use bevy_math::Vec2;
+    use bevy_picking::{
+        backend::{HitData, PointerHits},
+        input::PointerInputPlugin,
+        pointer::{PointerId, PointerLocation},
+        InteractionPlugin, PickingPlugin, PickingSystems,
+    };
+    use bevy_window::{PrimaryWindow, Window, WindowEvent};
+
+    #[derive(Resource, Default)]
+    struct Activations(usize);
+
+    /// A stand-in picking backend: every located pointer is over the button.
+    fn hit_button(
+        pointers: Query<(&PointerId, &PointerLocation)>,
+        button: Single<Entity, With<Button>>,
+        mut hits: MessageWriter<PointerHits>,
+    ) {
+        for (id, location) in &pointers {
+            if location.location().is_some() {
+                let hit = HitData::new(*button, 0.0, None, None);
+                hits.write(PointerHits::new(*id, vec![(*button, hit)], 0.0));
+            }
+        }
+    }
+
+    /// A touch that starts and ends within one frame (a quick tap on a slow
+    /// device, or `adb shell input tap`) activates the button and leaves it
+    /// unpressed.
+    #[test]
+    fn touch_starting_and_ending_in_one_frame_activates() {
+        let mut app = App::new();
+        app.add_message::<WindowEvent>()
+            .add_message::<TouchInput>()
+            .add_plugins((
+                PickingPlugin,
+                InteractionPlugin,
+                PointerInputPlugin,
+                ButtonPlugin,
+            ))
+            .init_resource::<Activations>()
+            .add_systems(PreUpdate, hit_button.in_set(PickingSystems::Backend));
+        let window = app
+            .world_mut()
+            .spawn((Window::default(), PrimaryWindow))
+            .id();
+        let button = app
+            .world_mut()
+            .spawn(Button)
+            .observe(|_: On<Activate>, mut n: ResMut<Activations>| n.0 += 1)
+            .id();
+        app.update();
+
+        for phase in [TouchPhase::Started, TouchPhase::Ended] {
+            let touch = TouchInput {
+                phase,
+                position: Vec2::new(10.0, 10.0),
+                window,
+                force: None,
+                id: 1,
+            };
+            app.world_mut().write_message(touch);
+            app.world_mut()
+                .write_message(WindowEvent::TouchInput(touch));
+        }
+        app.update();
+        app.update();
+
+        assert_eq!(app.world().resource::<Activations>().0, 1);
+        assert!(!app.world().entity(button).contains::<Pressed>());
+    }
+}
