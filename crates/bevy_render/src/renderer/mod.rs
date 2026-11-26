@@ -25,8 +25,8 @@ use bevy_log::{debug, info, warn};
 use bevy_render::camera::ExtractedCamera;
 use bevy_window::RawHandleWrapperHolder;
 use wgpu::{
-    Adapter, AdapterInfo, Backends, DeviceType, ForceShaderModelToken, Instance, Queue,
-    RequestAdapterOptions, Trace,
+    Adapter, AdapterInfo, Backends, DeviceType, DownlevelFlags, ForceShaderModelToken, Instance,
+    Limits, Queue, RequestAdapterOptions, Trace,
 };
 
 /// Schedule label for the root render graph schedule. This schedule runs once per frame
@@ -349,6 +349,18 @@ pub async fn initialize_renderer(
         limits = limits.or_worse_values_from(constrained_limits);
     }
 
+    let usable_limits =
+        limits_usable_by_bevy(limits.clone(), adapter.get_downlevel_capabilities().flags);
+    if usable_limits.max_storage_buffers_per_shader_stage
+        < limits.max_storage_buffers_per_shader_stage
+    {
+        info!(
+            "The GPU can't read storage buffers in vertex shaders \
+             (DownlevelFlags::VERTEX_STORAGE), so Bevy uses uniform buffers instead"
+        );
+    }
+    limits = usable_limits;
+
     let device_descriptor = wgpu::DeviceDescriptor {
         label: options.device_label.as_ref().map(AsRef::as_ref),
         required_features: features,
@@ -385,4 +397,60 @@ pub async fn initialize_renderer(
         #[cfg(feature = "raw_vulkan_init")]
         additional_vulkan_features,
     )
+}
+
+/// Narrows `limits` to what Bevy's renderer can use on a device with these
+/// downlevel `flags`.
+///
+/// Bevy reads storage buffers in vertex shaders (mesh transforms, skins, morph
+/// targets, visibility ranges) whenever `max_storage_buffers_per_shader_stage`
+/// is above zero. Some devices, such as Mali GPUs on OpenGL ES, have storage
+/// buffers in fragment and compute shaders but not in vertex shaders: wgpu
+/// reports the fragment count in that limit and leaves out
+/// [`DownlevelFlags::VERTEX_STORAGE`]. On such a device Bevy takes its uniform
+/// buffer paths everywhere, as it does on WebGL 2, by treating storage buffers
+/// as unavailable.
+fn limits_usable_by_bevy(mut limits: Limits, flags: DownlevelFlags) -> Limits {
+    if !flags.contains(DownlevelFlags::VERTEX_STORAGE) {
+        limits.max_storage_buffers_per_shader_stage = 0;
+        limits.max_dynamic_storage_buffers_per_pipeline_layout = 0;
+    }
+    limits
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_buffers_in_every_stage_are_kept() {
+        let limits = Limits::default();
+        let usable = limits_usable_by_bevy(limits.clone(), DownlevelFlags::all());
+        assert_eq!(usable, limits);
+    }
+
+    #[test]
+    fn no_storage_buffers_in_vertex_shaders_means_no_storage_buffers() {
+        // A Mali GPU on OpenGL ES: storage buffers in fragment and compute
+        // shaders, none in vertex shaders.
+        let limits = Limits {
+            max_storage_buffers_per_shader_stage: 4,
+            max_dynamic_storage_buffers_per_pipeline_layout: 4,
+            ..Limits::downlevel_defaults()
+        };
+        let flags = DownlevelFlags::all() - DownlevelFlags::VERTEX_STORAGE;
+        let usable = limits_usable_by_bevy(limits.clone(), flags);
+        assert_eq!(usable.max_storage_buffers_per_shader_stage, 0);
+        assert_eq!(usable.max_dynamic_storage_buffers_per_pipeline_layout, 0);
+        assert!(crate::storage_buffers_are_unsupported(&usable));
+        // Everything else is as the device reports it.
+        assert_eq!(
+            Limits {
+                max_storage_buffers_per_shader_stage: 4,
+                max_dynamic_storage_buffers_per_pipeline_layout: 4,
+                ..usable
+            },
+            limits
+        );
+    }
 }
