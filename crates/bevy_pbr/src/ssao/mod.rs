@@ -201,8 +201,12 @@ fn ssao(
         Some(ssao_pipeline),
     ) = (
         camera.physical_viewport_size,
-        pipeline_cache.get_compute_pipeline(pipelines.preprocess_depth_pipeline),
-        pipeline_cache.get_compute_pipeline(pipelines.spatial_denoise_pipeline),
+        pipelines
+            .preprocess_depth_pipeline
+            .and_then(|id| pipeline_cache.get_compute_pipeline(id)),
+        pipelines
+            .spatial_denoise_pipeline
+            .and_then(|id| pipeline_cache.get_compute_pipeline(id)),
         pipeline_cache.get_compute_pipeline(pipeline_id.0),
     )
     else {
@@ -276,8 +280,14 @@ fn ssao(
 
 #[derive(Resource)]
 struct SsaoPipelines {
-    preprocess_depth_pipeline: CachedComputePipelineId,
-    spatial_denoise_pipeline: CachedComputePipelineId,
+    /// The depth preprocessing and spatial denoising pipelines are queued with
+    /// the first view that uses SSAO, so nothing of SSAO is built for a GPU
+    /// unless a camera uses it. Some GPU drivers can't build SSAO's shaders,
+    /// and a pipeline that fails to build stops the app.
+    preprocess_depth_pipeline: Option<CachedComputePipelineId>,
+    spatial_denoise_pipeline: Option<CachedComputePipelineId>,
+    preprocess_depth_descriptor: ComputePipelineDescriptor,
+    spatial_denoise_descriptor: ComputePipelineDescriptor,
 
     common_bind_group_layout: BindGroupLayoutDescriptor,
     preprocess_depth_bind_group_layout: BindGroupLayoutDescriptor,
@@ -296,7 +306,6 @@ impl FromWorld for SsaoPipelines {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
         let render_queue = world.resource::<RenderQueue>();
-        let pipeline_cache = world.resource::<PipelineCache>();
 
         // Detect the depth format support
         let render_adapter = world.resource::<RenderAdapter>();
@@ -409,33 +418,33 @@ impl FromWorld for SsaoPipelines {
             shader_defs.push("USE_R16FLOAT".into());
         }
 
-        let preprocess_depth_pipeline =
-            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-                label: Some("ssao_preprocess_depth_pipeline".into()),
-                layout: vec![
-                    preprocess_depth_bind_group_layout.clone(),
-                    common_bind_group_layout.clone(),
-                ],
-                shader: load_embedded_asset!(world, "preprocess_depth.wesl"),
-                shader_defs: shader_defs.clone(),
-                ..default()
-            });
+        let preprocess_depth_descriptor = ComputePipelineDescriptor {
+            label: Some("ssao_preprocess_depth_pipeline".into()),
+            layout: vec![
+                preprocess_depth_bind_group_layout.clone(),
+                common_bind_group_layout.clone(),
+            ],
+            shader: load_embedded_asset!(world, "preprocess_depth.wesl"),
+            shader_defs: shader_defs.clone(),
+            ..default()
+        };
 
-        let spatial_denoise_pipeline =
-            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-                label: Some("ssao_spatial_denoise_pipeline".into()),
-                layout: vec![
-                    spatial_denoise_bind_group_layout.clone(),
-                    common_bind_group_layout.clone(),
-                ],
-                shader: load_embedded_asset!(world, "spatial_denoise.wesl"),
-                shader_defs,
-                ..default()
-            });
+        let spatial_denoise_descriptor = ComputePipelineDescriptor {
+            label: Some("ssao_spatial_denoise_pipeline".into()),
+            layout: vec![
+                spatial_denoise_bind_group_layout.clone(),
+                common_bind_group_layout.clone(),
+            ],
+            shader: load_embedded_asset!(world, "spatial_denoise.wesl"),
+            shader_defs,
+            ..default()
+        };
 
         Self {
-            preprocess_depth_pipeline,
-            spatial_denoise_pipeline,
+            preprocess_depth_pipeline: None,
+            spatial_denoise_pipeline: None,
+            preprocess_depth_descriptor,
+            spatial_denoise_descriptor,
 
             common_bind_group_layout,
             preprocess_depth_bind_group_layout,
@@ -449,6 +458,19 @@ impl FromWorld for SsaoPipelines {
             shader: load_embedded_asset!(world, "ssao.wesl"),
             depth_format,
         }
+    }
+}
+
+impl SsaoPipelines {
+    /// Queues the depth preprocessing and spatial denoising pipelines, which
+    /// every view that uses SSAO shares, if they aren't queued yet.
+    fn queue_shared_pipelines(&mut self, pipeline_cache: &PipelineCache) {
+        self.preprocess_depth_pipeline.get_or_insert_with(|| {
+            pipeline_cache.queue_compute_pipeline(self.preprocess_depth_descriptor.clone())
+        });
+        self.spatial_denoise_pipeline.get_or_insert_with(|| {
+            pipeline_cache.queue_compute_pipeline(self.spatial_denoise_descriptor.clone())
+        });
     }
 }
 
@@ -633,9 +655,13 @@ fn prepare_ssao_pipelines(
     mut commands: Commands,
     pipeline_cache: Res<PipelineCache>,
     mut pipelines: ResMut<SpecializedComputePipelines<SsaoPipelines>>,
-    pipeline: Res<SsaoPipelines>,
+    mut pipeline: ResMut<SsaoPipelines>,
     views: Query<(Entity, &ScreenSpaceAmbientOcclusion, Has<TemporalJitter>)>,
 ) {
+    if views.is_empty() {
+        return;
+    }
+    pipeline.queue_shared_pipelines(&pipeline_cache);
     for (entity, ssao_settings, temporal_jitter) in &views {
         let pipeline_id = pipelines.specialize(
             &pipeline_cache,
@@ -787,4 +813,90 @@ fn hilbert_index(mut x: u16, mut y: u16) -> u16 {
     }
 
     index
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_app::TaskPoolPlugin;
+    use bevy_asset::{AssetApp, AssetPlugin};
+    use bevy_ecs::system::RunSystemOnce;
+    use bevy_platform::future::block_on;
+
+    /// An app with what SSAO's render setup needs, on wgpu's noop backend.
+    fn render_app() -> App {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::NOOP,
+            flags: wgpu::InstanceFlags::default(),
+            memory_budget_thresholds: Default::default(),
+            display: None,
+            backend_options: wgpu::BackendOptions {
+                noop: wgpu::NoopBackendOptions {
+                    enable: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        });
+        let adapter =
+            block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).unwrap();
+        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }))
+        .unwrap();
+        let device = RenderDevice::from(device);
+
+        let mut app = App::new();
+        app.add_plugins((TaskPoolPlugin::default(), AssetPlugin::default()))
+            .init_asset::<Shader>()
+            .insert_resource(PipelineCache::new(device.clone(), false))
+            .insert_resource(device)
+            .insert_resource(RenderQueue::new(queue))
+            .insert_resource(RenderAdapter::new(adapter))
+            .init_resource::<SpecializedComputePipelines<SsaoPipelines>>();
+        let pipelines = SsaoPipelines::from_world(app.world_mut());
+        app.insert_resource(pipelines);
+        app
+    }
+
+    /// The labels of the compute pipelines queued so far, sorted.
+    fn queued(app: &mut App) -> Vec<String> {
+        let mut cache = app.world_mut().resource_mut::<PipelineCache>();
+        cache.process_queue();
+        let mut labels: Vec<String> = cache
+            .pipelines()
+            .filter_map(|p| match &p.descriptor {
+                PipelineDescriptor::ComputePipelineDescriptor(d) => {
+                    d.label.as_deref().map(Into::into)
+                }
+                _ => None,
+            })
+            .collect();
+        labels.sort();
+        labels
+    }
+
+    #[test]
+    fn nothing_of_ssao_is_built_until_a_view_uses_it() {
+        let mut app = render_app();
+        app.world_mut()
+            .run_system_once(prepare_ssao_pipelines)
+            .unwrap();
+        assert!(queued(&mut app).is_empty());
+
+        app.world_mut()
+            .spawn(ScreenSpaceAmbientOcclusion::default());
+        app.world_mut()
+            .run_system_once(prepare_ssao_pipelines)
+            .unwrap();
+        assert_eq!(
+            queued(&mut app),
+            [
+                "ssao_preprocess_depth_pipeline",
+                "ssao_spatial_denoise_pipeline",
+                "ssao_ssao_pipeline"
+            ]
+        );
+    }
 }

@@ -94,6 +94,10 @@ arrayvec = { version = "0.7", default-features = false }
 indexmap = { version = "2" }
 wgpu-types = "30"
 
+[dev-dependencies]
+# noop backend: a render device for tests, with no GPU
+wgpu = { version = "30", default-features = false, features = ["noop"] }
+
 [lints]
 workspace = true
 
