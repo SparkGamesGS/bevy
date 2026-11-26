@@ -1048,6 +1048,57 @@ pub enum LightEntity {
     },
 }
 
+/// The texture that holds the point lights' shadow maps: `count` cube maps,
+/// `size` texels a side.
+fn point_light_shadow_map_texture(count: usize, size: u32) -> TextureDescriptor<'static> {
+    let size = shadow_map_texture_size(count, size);
+    TextureDescriptor {
+        size: Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: count.max(1) as u32 * 6,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: CORE_3D_SHADOW_MAP_FORMAT,
+        label: Some("point_light_shadow_map_texture"),
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    }
+}
+
+/// The texture that holds the directional light cascades' and spot lights'
+/// shadow maps: `count` of them, `size` texels a side.
+fn directional_light_shadow_map_texture(count: usize, size: u32) -> TextureDescriptor<'static> {
+    let size = shadow_map_texture_size(count, size);
+    TextureDescriptor {
+        size: Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: count.max(1) as u32,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: CORE_3D_SHADOW_MAP_FORMAT,
+        label: Some("directional_light_shadow_map_texture"),
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    }
+}
+
+/// The width and height of a texture that holds `count` shadow maps of `size`
+/// texels a side. With none to hold, the texture is still bound, but nothing
+/// draws to it or samples it, so a 1x1 placeholder does.
+fn shadow_map_texture_size(count: usize, size: u32) -> u32 {
+    if count == 0 {
+        1
+    } else {
+        size
+    }
+}
+
 pub fn prepare_lights(
     mut commands: Commands,
     mut texture_cache: ResMut<TextureCache>,
@@ -1483,20 +1534,10 @@ pub fn prepare_lights(
 
     let point_light_depth_texture = texture_cache.get(
         &render_device,
-        TextureDescriptor {
-            size: Extent3d {
-                width: point_light_shadow_map.size as u32,
-                height: point_light_shadow_map.size as u32,
-                depth_or_array_layers: point_light_shadow_maps_count.max(1) as u32 * 6,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: CORE_3D_SHADOW_MAP_FORMAT,
-            label: Some("point_light_shadow_map_texture"),
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        },
+        point_light_shadow_map_texture(
+            point_light_shadow_maps_count,
+            point_light_shadow_map.size as u32,
+        ),
     );
 
     let point_light_depth_texture_view =
@@ -1531,24 +1572,11 @@ pub fn prepare_lights(
 
     let directional_light_depth_texture = texture_cache.get(
         &render_device,
-        TextureDescriptor {
-            size: Extent3d {
-                width: (directional_light_shadow_map.size as u32)
-                    .min(render_device.limits().max_texture_dimension_2d),
-                height: (directional_light_shadow_map.size as u32)
-                    .min(render_device.limits().max_texture_dimension_2d),
-                depth_or_array_layers: (num_directional_cascades_enabled
-                    + spot_light_shadow_maps_count)
-                    .max(1) as u32,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: CORE_3D_SHADOW_MAP_FORMAT,
-            label: Some("directional_light_shadow_map_texture"),
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        },
+        directional_light_shadow_map_texture(
+            num_directional_cascades_enabled + spot_light_shadow_maps_count,
+            (directional_light_shadow_map.size as u32)
+                .min(render_device.limits().max_texture_dimension_2d),
+        ),
     );
 
     let directional_light_depth_texture_view =
@@ -3160,5 +3188,39 @@ pub fn extract_shadow_lod_origin(
             render_shadow_lod_origin.0 = global_transform.translation();
         }
         None => render_shadow_lod_origin.0 = Default::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_shadow_maps_take_no_shadow_map_memory() {
+        for texture in [
+            point_light_shadow_map_texture(0, 1024),
+            directional_light_shadow_map_texture(0, 2048),
+        ] {
+            assert_eq!((texture.size.width, texture.size.height), (1, 1));
+        }
+    }
+
+    #[test]
+    fn shadow_maps_are_the_size_asked_for() {
+        let size = |width, layers| Extent3d {
+            width,
+            height: width,
+            depth_or_array_layers: layers,
+        };
+        assert_eq!(point_light_shadow_map_texture(1, 1024).size, size(1024, 6));
+        assert_eq!(point_light_shadow_map_texture(3, 512).size, size(512, 18));
+        assert_eq!(
+            directional_light_shadow_map_texture(1, 2048).size,
+            size(2048, 1)
+        );
+        assert_eq!(
+            directional_light_shadow_map_texture(5, 4096).size,
+            size(4096, 5)
+        );
     }
 }
