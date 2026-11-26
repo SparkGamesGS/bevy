@@ -1558,6 +1558,23 @@ mod tests {
         window.set_physical_cursor_position(Some(DVec2::new(400., 600.)));
         assert!(window.physical_cursor_position().is_none());
     }
+
+    // Checks that setting the cursor position asks the backend to move the OS cursor there, once.
+    #[test]
+    fn set_cursor_position_requests_moving_the_os_cursor() {
+        let mut window = Window {
+            resolution: WindowResolution::new(800, 600).with_scale_factor_override(2.0),
+            ..Default::default()
+        };
+
+        window.set_cursor_position(Some(Vec2::new(100., 50.)));
+        assert_eq!(window.cursor_position(), Some(Vec2::new(100., 50.)));
+        assert_eq!(
+            window.internal.take_cursor_position_request(),
+            Some(DVec2::new(200., 100.))
+        );
+        assert_eq!(window.internal.take_cursor_position_request(), None);
+    }
 }
 
 /// Represents the relationship between a Window and the Monitor it is currently on.

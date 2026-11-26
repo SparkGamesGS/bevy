@@ -190,3 +190,92 @@ pub fn close_when_requested(
         commands.entity(event.window).try_insert(ClosingWindow);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        CursorLeft, CursorMoved, ExitCondition, PrimaryWindow, RawCursorMoved, Window, WindowEvent,
+        WindowFocused, WindowPlugin, WindowResolution,
+    };
+    use alloc::vec::Vec;
+    use bevy_app::App;
+    use bevy_ecs::{message::Messages, prelude::*};
+    use bevy_math::{DVec2, Vec2};
+
+    /// An app with a 400x300 primary window at scale factor 2.
+    fn app() -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins(WindowPlugin {
+            primary_window: Some(Window {
+                resolution: WindowResolution::new(800, 600).with_scale_factor_override(2.0),
+                ..Default::default()
+            }),
+            exit_condition: ExitCondition::DontExit,
+            close_when_requested: false,
+            ..Default::default()
+        });
+        let window = app
+            .world_mut()
+            .query_filtered::<Entity, With<PrimaryWindow>>()
+            .single(app.world())
+            .unwrap();
+        (app, window)
+    }
+
+    fn written_this_update<M: Message + Clone>(app: &App) -> Vec<M> {
+        app.world()
+            .resource::<Messages<M>>()
+            .iter_current_update_messages()
+            .cloned()
+            .collect()
+    }
+
+    /// A `WindowEvent` written by app code (a test, automation, remote control)
+    /// reaches the readers of its typed message once, as one from a window
+    /// backend does.
+    #[test]
+    fn window_event_written_by_app_code_reaches_its_typed_message() {
+        let (mut app, window) = app();
+        let focused = WindowFocused {
+            window,
+            focused: true,
+        };
+        app.world_mut()
+            .write_message(WindowEvent::WindowFocused(focused.clone()));
+        app.update();
+        assert_eq!(written_this_update::<WindowFocused>(&app), [focused]);
+    }
+
+    /// A cursor move written as a window event moves the window's cursor and
+    /// writes `CursorMoved`, without asking the backend to move the OS cursor.
+    #[test]
+    fn cursor_moved_window_event_moves_the_cursor_without_a_warp_request() {
+        let (mut app, window) = app();
+        for (x, delta) in [(200.0, None), (300.0, Some(Vec2::new(50.0, 0.0)))] {
+            app.world_mut()
+                .write_message(WindowEvent::CursorMoved(RawCursorMoved {
+                    window,
+                    physical_position: DVec2::new(x, 100.0),
+                }));
+            app.update();
+            let position = Vec2::new(x as f32 / 2.0, 50.0);
+            assert_eq!(
+                written_this_update::<CursorMoved>(&app),
+                [CursorMoved {
+                    window,
+                    position,
+                    delta
+                }]
+            );
+            let mut w = app.world_mut().get_mut::<Window>(window).unwrap();
+            assert_eq!(w.cursor_position(), Some(position));
+            assert_eq!(w.internal.take_cursor_position_request(), None);
+        }
+
+        app.world_mut()
+            .write_message(WindowEvent::CursorLeft(CursorLeft { window }));
+        app.update();
+        let window = app.world().get::<Window>(window).unwrap();
+        assert_eq!(window.cursor_position(), None);
+    }
+}
