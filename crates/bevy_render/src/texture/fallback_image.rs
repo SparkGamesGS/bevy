@@ -75,7 +75,7 @@ fn fallback_image_new(
 ) -> GpuImage {
     // TODO make this configurable per channel
 
-    let extents = Extent3d {
+    let mut extents = Extent3d {
         width: 1,
         height: 1,
         depth_or_array_layers: match dimension {
@@ -83,6 +83,11 @@ fn fallback_image_new(
             _ => 1,
         },
     };
+    extents.depth_or_array_layers = array_layers_for_view(
+        render_device.wgpu_device().adapter_info().backend,
+        dimension,
+        extents,
+    );
 
     // We can't create textures with data when it's a depth texture or when using multiple samples
     let create_texture_with_data = !format.is_depth_stencil_format() && samples == 1;

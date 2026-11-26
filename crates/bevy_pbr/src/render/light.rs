@@ -62,7 +62,7 @@ use bevy_render::{
     render_asset::RenderAssets,
     render_phase::*,
     render_resource::*,
-    renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
+    renderer::{RenderAdapterInfo, RenderContext, RenderDevice, RenderQueue, ViewQuery},
     texture::*,
     view::ExtractedView,
     Extract,
@@ -75,6 +75,7 @@ use decal::clustered::RenderClusteredDecals;
 #[cfg(feature = "trace")]
 use tracing::info_span;
 use tracing::{error, warn};
+use wgpu_types::Backend;
 
 #[derive(Component)]
 #[require(PointAndSpotLightViewEntities)]
@@ -1048,15 +1049,57 @@ pub enum LightEntity {
     },
 }
 
+/// How the point lights' shadow maps are viewed and bound: as a cube map array,
+/// or as one cube map where cube map arrays are missing.
+// NOTE: iOS Simulator is missing CubeArray support so we use Cube instead.
+// See https://github.com/bevyengine/bevy/pull/12052 - remove if support is added.
+const POINT_LIGHT_SHADOW_MAP_VIEW_DIMENSION: TextureViewDimension = if cfg!(any(
+    target_abi = "sim",
+    all(
+        feature = "webgl",
+        target_arch = "wasm32",
+        not(feature = "webgpu")
+    )
+)) {
+    TextureViewDimension::Cube
+} else {
+    TextureViewDimension::CubeArray
+};
+
+/// How the directional and spot lights' shadow maps are viewed and bound: as a
+/// 2D array, or as one 2D texture on WebGL 2.
+const DIRECTIONAL_LIGHT_SHADOW_MAP_VIEW_DIMENSION: TextureViewDimension = if cfg!(all(
+    feature = "webgl",
+    target_arch = "wasm32",
+    not(feature = "webgpu")
+)) {
+    TextureViewDimension::D2
+} else {
+    TextureViewDimension::D2Array
+};
+
 /// The texture that holds the point lights' shadow maps: `count` cube maps,
-/// `size` texels a side.
-fn point_light_shadow_map_texture(count: usize, size: u32) -> TextureDescriptor<'static> {
+/// `size` texels a side, and on OpenGL as many more as it takes to make it the
+/// kind of texture its view binds (see [`array_layers_for_view`]).
+fn point_light_shadow_map_texture(
+    backend: Backend,
+    count: usize,
+    size: u32,
+) -> TextureDescriptor<'static> {
     let size = shadow_map_texture_size(count, size);
+    let size = Extent3d {
+        width: size,
+        height: size,
+        depth_or_array_layers: count.max(1) as u32 * 6,
+    };
     TextureDescriptor {
         size: Extent3d {
-            width: size,
-            height: size,
-            depth_or_array_layers: count.max(1) as u32 * 6,
+            depth_or_array_layers: array_layers_for_view(
+                backend,
+                POINT_LIGHT_SHADOW_MAP_VIEW_DIMENSION,
+                size,
+            ),
+            ..size
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -1069,14 +1112,28 @@ fn point_light_shadow_map_texture(count: usize, size: u32) -> TextureDescriptor<
 }
 
 /// The texture that holds the directional light cascades' and spot lights'
-/// shadow maps: `count` of them, `size` texels a side.
-fn directional_light_shadow_map_texture(count: usize, size: u32) -> TextureDescriptor<'static> {
+/// shadow maps: `count` of them, `size` texels a side, and on OpenGL as many
+/// more as it takes to make it the kind of texture its view binds (see
+/// [`array_layers_for_view`]).
+fn directional_light_shadow_map_texture(
+    backend: Backend,
+    count: usize,
+    size: u32,
+) -> TextureDescriptor<'static> {
     let size = shadow_map_texture_size(count, size);
+    let size = Extent3d {
+        width: size,
+        height: size,
+        depth_or_array_layers: count.max(1) as u32,
+    };
     TextureDescriptor {
         size: Extent3d {
-            width: size,
-            height: size,
-            depth_or_array_layers: count.max(1) as u32,
+            depth_or_array_layers: array_layers_for_view(
+                backend,
+                DIRECTIONAL_LIGHT_SHADOW_MAP_VIEW_DIMENSION,
+                size,
+            ),
+            ..size
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -1102,7 +1159,11 @@ fn shadow_map_texture_size(count: usize, size: u32) -> u32 {
 pub fn prepare_lights(
     mut commands: Commands,
     mut texture_cache: ResMut<TextureCache>,
-    (render_device, render_queue): (Res<RenderDevice>, Res<RenderQueue>),
+    (render_device, render_queue, render_adapter_info): (
+        Res<RenderDevice>,
+        Res<RenderQueue>,
+        Res<RenderAdapterInfo>,
+    ),
     mut global_clusterable_object_meta: ResMut<GlobalClusterableObjectMeta>,
     mut light_meta: ResMut<LightMeta>,
     views: Query<
@@ -1535,6 +1596,7 @@ pub fn prepare_lights(
     let point_light_depth_texture = texture_cache.get(
         &render_device,
         point_light_shadow_map_texture(
+            render_adapter_info.backend,
             point_light_shadow_maps_count,
             point_light_shadow_map.size as u32,
         ),
@@ -1546,22 +1608,7 @@ pub fn prepare_lights(
             .create_view(&TextureViewDescriptor {
                 label: Some("point_light_shadow_map_array_texture_view"),
                 format: None,
-                // NOTE: iOS Simulator is missing CubeArray support so we use Cube instead.
-                // See https://github.com/bevyengine/bevy/pull/12052 - remove if support is added.
-                #[cfg(all(
-                    not(target_abi = "sim"),
-                    any(
-                        not(feature = "webgl"),
-                        not(target_arch = "wasm32"),
-                        feature = "webgpu"
-                    )
-                ))]
-                dimension: Some(TextureViewDimension::CubeArray),
-                #[cfg(any(
-                    target_abi = "sim",
-                    all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu"))
-                ))]
-                dimension: Some(TextureViewDimension::Cube),
+                dimension: Some(POINT_LIGHT_SHADOW_MAP_VIEW_DIMENSION),
                 usage: None,
                 aspect: TextureAspect::DepthOnly,
                 base_mip_level: 0,
@@ -1573,6 +1620,7 @@ pub fn prepare_lights(
     let directional_light_depth_texture = texture_cache.get(
         &render_device,
         directional_light_shadow_map_texture(
+            render_adapter_info.backend,
             num_directional_cascades_enabled + spot_light_shadow_maps_count,
             (directional_light_shadow_map.size as u32)
                 .min(render_device.limits().max_texture_dimension_2d),
@@ -1585,14 +1633,7 @@ pub fn prepare_lights(
             .create_view(&TextureViewDescriptor {
                 label: Some("directional_light_shadow_map_array_texture_view"),
                 format: None,
-                #[cfg(any(
-                    not(feature = "webgl"),
-                    not(target_arch = "wasm32"),
-                    feature = "webgpu"
-                ))]
-                dimension: Some(TextureViewDimension::D2Array),
-                #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
-                dimension: Some(TextureViewDimension::D2),
+                dimension: Some(DIRECTIONAL_LIGHT_SHADOW_MAP_VIEW_DIMENSION),
                 usage: None,
                 aspect: TextureAspect::DepthOnly,
                 base_mip_level: 0,
@@ -3197,11 +3238,13 @@ mod tests {
 
     #[test]
     fn no_shadow_maps_take_no_shadow_map_memory() {
-        for texture in [
-            point_light_shadow_map_texture(0, 1024),
-            directional_light_shadow_map_texture(0, 2048),
-        ] {
-            assert_eq!((texture.size.width, texture.size.height), (1, 1));
+        for backend in [Backend::Vulkan, Backend::Gl] {
+            for texture in [
+                point_light_shadow_map_texture(backend, 0, 1024),
+                directional_light_shadow_map_texture(backend, 0, 2048),
+            ] {
+                assert_eq!((texture.size.width, texture.size.height), (1, 1));
+            }
         }
     }
 
@@ -3212,15 +3255,54 @@ mod tests {
             height: width,
             depth_or_array_layers: layers,
         };
-        assert_eq!(point_light_shadow_map_texture(1, 1024).size, size(1024, 6));
-        assert_eq!(point_light_shadow_map_texture(3, 512).size, size(512, 18));
+        let vulkan = Backend::Vulkan;
         assert_eq!(
-            directional_light_shadow_map_texture(1, 2048).size,
+            point_light_shadow_map_texture(vulkan, 1, 1024).size,
+            size(1024, 6)
+        );
+        assert_eq!(
+            point_light_shadow_map_texture(vulkan, 3, 512).size,
+            size(512, 18)
+        );
+        assert_eq!(
+            directional_light_shadow_map_texture(vulkan, 1, 2048).size,
             size(2048, 1)
         );
         assert_eq!(
-            directional_light_shadow_map_texture(5, 4096).size,
-            size(4096, 5)
+            directional_light_shadow_map_texture(vulkan, 6, 4096).size,
+            size(4096, 6)
         );
+    }
+
+    /// wgpu's OpenGL backend makes six square layers a cube map, other
+    /// multiples of six a cube map array, one layer a 2D texture and any other
+    /// count a 2D array, and the shaders sample a cube map array and a 2D array.
+    #[test]
+    fn on_opengl_shadow_map_textures_are_the_kind_their_views_bind() {
+        assert_eq!(
+            POINT_LIGHT_SHADOW_MAP_VIEW_DIMENSION,
+            TextureViewDimension::CubeArray
+        );
+        assert_eq!(
+            DIRECTIONAL_LIGHT_SHADOW_MAP_VIEW_DIMENSION,
+            TextureViewDimension::D2Array
+        );
+        for count in 0..=13 {
+            let point = point_light_shadow_map_texture(Backend::Gl, count, 1024).size;
+            let layers = point.depth_or_array_layers;
+            assert!(layers >= count.max(1) as u32 * 6);
+            assert!(
+                layers > 6 && layers.is_multiple_of(6),
+                "{count} point lights: {layers} layers"
+            );
+
+            let directional = directional_light_shadow_map_texture(Backend::Gl, count, 2048).size;
+            let layers = directional.depth_or_array_layers;
+            assert!(layers >= count.max(1) as u32);
+            assert!(
+                layers > 1 && !layers.is_multiple_of(6),
+                "{count} directional shadow maps: {layers} layers"
+            );
+        }
     }
 }
